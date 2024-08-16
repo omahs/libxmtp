@@ -23,8 +23,8 @@ pub enum PermissionLevel {
 
 impl MlsGroup {
     // Load the member list for the group from the DB, merging together multiple installations into a single entry
-    pub fn members(&self) -> Result<Vec<GroupMember>, GroupError> {
-        let conn = self.context.store.conn()?;
+    pub async fn members(&self) -> Result<Vec<GroupMember>, GroupError> {
+        let conn = self.context.store.conn().await?;
         let provider = self.context.mls_provider(conn);
         self.members_with_provider(&provider)
     }

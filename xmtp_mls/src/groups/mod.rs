@@ -201,7 +201,7 @@ impl RetryableError for GroupError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MlsGroup {
     pub group_id: Vec<u8>,
     pub created_at_ns: i64,
@@ -214,16 +214,6 @@ pub struct GroupMetadataOptions {
     pub image_url_square: Option<String>,
     pub description: Option<String>,
     pub pinned_frame_url: Option<String>,
-}
-
-impl Clone for MlsGroup {
-    fn clone(&self) -> Self {
-        Self {
-            context: self.context.clone(),
-            group_id: self.group_id.clone(),
-            created_at_ns: self.created_at_ns,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -379,10 +369,10 @@ impl MlsGroup {
         Self::create_from_welcome(client, provider, welcome, inbox_id, welcome_id).await
     }
 
-    pub(crate) fn create_and_insert_sync_group(
+    pub(crate) async fn create_and_insert_sync_group(
         context: Arc<XmtpMlsLocalContext>,
     ) -> Result<MlsGroup, GroupError> {
-        let conn = context.store.conn()?;
+        let conn = context.store.conn().await?;
         // let my_sequence_id = context.inbox_sequence_id(&conn)?;
         let provider = XmtpOpenMlsProvider::new(conn);
         let protected_metadata =
@@ -582,7 +572,7 @@ impl MlsGroup {
         client: &Client<ApiClient>,
         inbox_ids: Vec<String>,
     ) -> Result<(), GroupError> {
-        let conn = client.store().conn()?;
+        let conn = client.store().conn().await?;
         let provider = client.mls_provider(conn);
         let intent_data = self
             .get_membership_update_intent(client, &provider, inbox_ids, vec![])
@@ -596,13 +586,15 @@ impl MlsGroup {
             return Ok(());
         }
 
-        let intent = provider.conn().insert_group_intent(NewGroupIntent::new(
-            IntentKind::UpdateGroupMembership,
-            self.group_id.clone(),
-            intent_data.into(),
-        ))?;
+        let intent = conn
+            .insert_group_intent(NewGroupIntent::new(
+                IntentKind::UpdateGroupMembership,
+                self.group_id.clone(),
+                intent_data.into(),
+            ))
+            .await?;
 
-        self.sync_until_intent_resolved(provider.conn(), intent.id, client)
+        self.sync_until_intent_resolved(conn, intent.id, client)
             .await
     }
 
@@ -620,24 +612,39 @@ impl MlsGroup {
 
     pub async fn remove_members_by_inbox_id<ApiClient: XmtpApi>(
         &self,
-        client: &Client<ApiClient>,
+        client: &Arc<Client<ApiClient>>,
         inbox_ids: Vec<InboxId>,
     ) -> Result<(), GroupError> {
-        let conn = client.store().conn()?;
-        let provider = client.mls_provider(conn);
-        let intent_data = self
-            .get_membership_update_intent(client, &provider, vec![], inbox_ids)
+        let conn = client.store().conn().await?;
+
+        let client = client.clone();
+        let this = self.clone();
+        let intent_data = conn
+            .raw_query(move |conn| {
+                let provider = XmtpOpenMlsProvider::new(conn);
+                let future = async {
+                    let intent_data = this
+                        .get_membership_update_intent(&client, &provider, vec![], inbox_ids)
+                        .await?;
+                    Ok(intent_data)
+                };
+                // its OK to block in raw_query
+                // because its running in spawn_blocking.
+                let handle = tokio::runtime::Handle::current();
+                let intent_data = handle.block_on(future)?;
+                Ok(intent_data)
+            })
             .await?;
 
-        let intent = provider
-            .conn_ref()
+        let intent = conn
             .insert_group_intent(NewGroupIntent::new(
                 IntentKind::UpdateGroupMembership,
                 self.group_id.clone(),
                 intent_data.into(),
-            ))?;
+            ))
+            .await?;
 
-        self.sync_until_intent_resolved(provider.conn(), intent.id, client)
+        self.sync_until_intent_resolved(conn, intent.id, &client)
             .await
     }
 
@@ -784,7 +791,7 @@ impl MlsGroup {
     where
         ApiClient: XmtpApi,
     {
-        let conn = self.context.store.conn()?;
+        let conn = self.context.store.conn().await?;
         let intent_data: Vec<u8> =
             UpdateMetadataIntentData::new_update_group_pinned_frame_url(pinned_frame_url).into();
         let intent = conn.insert_group_intent(NewGroupIntent::new(
@@ -839,7 +846,7 @@ impl MlsGroup {
     where
         ApiClient: XmtpApi,
     {
-        let conn = self.context.store.conn()?;
+        let conn = self.context.store.conn().await?;
         let intent_action_type = match action_type {
             UpdateAdminListType::Add => AdminListActionType::Add,
             UpdateAdminListType::Remove => AdminListActionType::Remove,
@@ -859,8 +866,8 @@ impl MlsGroup {
     }
 
     /// Find the `inbox_id` of the group member who added the member to the group
-    pub fn added_by_inbox_id(&self) -> Result<String, GroupError> {
-        let conn = self.context.store.conn()?;
+    pub async fn added_by_inbox_id(&self) -> Result<String, GroupError> {
+        let conn = self.context.store.conn().await?;
         conn.find_group(self.group_id.clone())
             .map_err(GroupError::from)
             .and_then(|fetch_result| {
@@ -875,41 +882,46 @@ impl MlsGroup {
     where
         ApiClient: XmtpApi,
     {
-        let conn = self.context.store.conn()?;
+        let conn = self.context.store.conn().await?;
         let intent = NewGroupIntent::new(IntentKind::KeyUpdate, self.group_id.clone(), vec![]);
         intent.store(&conn)?;
 
         self.sync_with_conn(conn, client).await
     }
 
-    pub fn is_active(&self) -> Result<bool, GroupError> {
-        let conn = self.context.store.conn()?;
+    pub async fn is_active(&self) -> Result<bool, GroupError> {
+        let conn = self.context.store.conn().await?;
         let provider = XmtpOpenMlsProvider::new(conn);
         let mls_group = self.load_mls_group(&provider)?;
 
         Ok(mls_group.is_active())
     }
 
-    pub fn metadata(&self) -> Result<GroupMetadata, GroupError> {
-        let conn = self.context.store.conn()?;
+    pub async fn metadata(&self) -> Result<GroupMetadata, GroupError> {
+        let conn = self.context.store.conn().await?;
         let provider = XmtpOpenMlsProvider::new(conn);
         let mls_group = self.load_mls_group(&provider)?;
 
         Ok(extract_group_metadata(&mls_group)?)
     }
 
-    pub fn mutable_metadata(&self) -> Result<GroupMutableMetadata, GroupError> {
-        let conn = self.context.store.conn()?;
+    pub async fn mutable_metadata(&self) -> Result<GroupMutableMetadata, GroupError> {
+        let conn = self.context.store.conn().await?;
         let provider = XmtpOpenMlsProvider::new(conn);
         let mls_group = &self.load_mls_group(&provider)?;
 
         Ok(mls_group.try_into()?)
     }
 
-    pub fn permissions(&self) -> Result<GroupMutablePermissions, GroupError> {
-        let conn = self.context.store.conn()?;
-        let provider = XmtpOpenMlsProvider::new(conn);
-        let mls_group = self.load_mls_group(&provider)?;
+    pub async fn permissions(&self) -> Result<GroupMutablePermissions, GroupError> {
+        let conn = self.context.store.conn().await?;
+
+        let mls_group = conn
+            .raw_query(|conn| {
+                let provider = XmtpOpenMlsProvider::new(conn);
+                Ok(self.load_mls_group(&provider))
+            })
+            .await?;
 
         Ok(extract_group_permissions(&mls_group)?)
     }

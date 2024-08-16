@@ -146,20 +146,22 @@ impl NewGroupIntent {
 
 impl DbConnection {
     #[tracing::instrument(level = "trace", skip(self))]
-    pub fn insert_group_intent(
+    pub async fn insert_group_intent(
         &self,
         to_save: NewGroupIntent,
     ) -> Result<StoredGroupIntent, StorageError> {
-        Ok(self.raw_query(|conn| {
-            diesel::insert_into(dsl::group_intents)
-                .values(to_save)
-                .get_result(conn)
-        })?)
+        Ok(self
+            .raw_query(|conn| {
+                diesel::insert_into(dsl::group_intents)
+                    .values(to_save)
+                    .get_result(conn)
+            })
+            .await?)
     }
 
     // Query for group_intents by group_id, optionally filtering by state and kind
     #[tracing::instrument(level = "trace", skip(self))]
-    pub fn find_group_intents(
+    pub async fn find_group_intents(
         &self,
         group_id: Vec<u8>,
         allowed_states: Option<Vec<IntentState>>,
@@ -179,34 +181,38 @@ impl DbConnection {
 
         query = query.order(dsl::id.asc());
 
-        Ok(self.raw_query(|conn| query.load::<StoredGroupIntent>(conn))?)
+        Ok(self
+            .raw_query(|conn| query.load::<StoredGroupIntent>(conn))
+            .await?)
     }
 
     // Set the intent with the given ID to `Published` and set the payload hash. Optionally add
     // `post_commit_data`
-    pub fn set_group_intent_published(
+    pub async fn set_group_intent_published(
         &self,
         intent_id: ID,
         payload_hash: Vec<u8>,
         post_commit_data: Option<Vec<u8>>,
     ) -> Result<(), StorageError> {
-        let res = self.raw_query(|conn| {
-            diesel::update(dsl::group_intents)
-                .filter(dsl::id.eq(intent_id))
-                // State machine requires that the only valid state transition to Published is from
-                // ToPublish
-                .filter(
-                    dsl::state
-                        .eq(IntentState::ToPublish)
-                        .or(dsl::state.eq(IntentState::Published)),
-                )
-                .set((
-                    dsl::state.eq(IntentState::Published),
-                    dsl::payload_hash.eq(payload_hash),
-                    dsl::post_commit_data.eq(post_commit_data),
-                ))
-                .execute(conn)
-        })?;
+        let res = self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_intents)
+                    .filter(dsl::id.eq(intent_id))
+                    // State machine requires that the only valid state transition to Published is from
+                    // ToPublish
+                    .filter(
+                        dsl::state
+                            .eq(IntentState::ToPublish)
+                            .or(dsl::state.eq(IntentState::Published)),
+                    )
+                    .set((
+                        dsl::state.eq(IntentState::Published),
+                        dsl::payload_hash.eq(payload_hash),
+                        dsl::post_commit_data.eq(post_commit_data),
+                    ))
+                    .execute(conn)
+            })
+            .await?;
 
         match res {
             // If nothing matched the query, return an error. Either ID or state was wrong
@@ -218,16 +224,18 @@ impl DbConnection {
     }
 
     // Set the intent with the given ID to `Committed`
-    pub fn set_group_intent_committed(&self, intent_id: ID) -> Result<(), StorageError> {
-        let res = self.raw_query(|conn| {
-            diesel::update(dsl::group_intents)
-                .filter(dsl::id.eq(intent_id))
-                // State machine requires that the only valid state transition to Committed is from
-                // Published
-                .filter(dsl::state.eq(IntentState::Published))
-                .set(dsl::state.eq(IntentState::Committed))
-                .execute(conn)
-        })?;
+    pub async fn set_group_intent_committed(&self, intent_id: ID) -> Result<(), StorageError> {
+        let res = self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_intents)
+                    .filter(dsl::id.eq(intent_id))
+                    // State machine requires that the only valid state transition to Committed is from
+                    // Published
+                    .filter(dsl::state.eq(IntentState::Published))
+                    .set(dsl::state.eq(IntentState::Committed))
+                    .execute(conn)
+            })
+            .await?;
 
         match res {
             // If nothing matched the query, return an error. Either ID or state was wrong
@@ -240,21 +248,23 @@ impl DbConnection {
 
     // Set the intent with the given ID to `ToPublish`. Wipe any values for `payload_hash` and
     // `post_commit_data`
-    pub fn set_group_intent_to_publish(&self, intent_id: ID) -> Result<(), StorageError> {
-        let res = self.raw_query(|conn| {
-            diesel::update(dsl::group_intents)
-                .filter(dsl::id.eq(intent_id))
-                // State machine requires that the only valid state transition to ToPublish is from
-                // Published
-                .filter(dsl::state.eq(IntentState::Published))
-                .set((
-                    dsl::state.eq(IntentState::ToPublish),
-                    // When moving to ToPublish, clear the payload hash and post commit data
-                    dsl::payload_hash.eq(None::<Vec<u8>>),
-                    dsl::post_commit_data.eq(None::<Vec<u8>>),
-                ))
-                .execute(conn)
-        })?;
+    pub async fn set_group_intent_to_publish(&self, intent_id: ID) -> Result<(), StorageError> {
+        let res = self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_intents)
+                    .filter(dsl::id.eq(intent_id))
+                    // State machine requires that the only valid state transition to ToPublish is from
+                    // Published
+                    .filter(dsl::state.eq(IntentState::Published))
+                    .set((
+                        dsl::state.eq(IntentState::ToPublish),
+                        // When moving to ToPublish, clear the payload hash and post commit data
+                        dsl::payload_hash.eq(None::<Vec<u8>>),
+                        dsl::post_commit_data.eq(None::<Vec<u8>>),
+                    ))
+                    .execute(conn)
+            })
+            .await?;
 
         match res {
             // If nothing matched the query, return an error. Either ID or state was wrong
@@ -267,13 +277,15 @@ impl DbConnection {
 
     /// Set the intent with the given ID to `Error`
     #[tracing::instrument(level = "trace", skip(self))]
-    pub fn set_group_intent_error(&self, intent_id: ID) -> Result<(), StorageError> {
-        let res = self.raw_query(|conn| {
-            diesel::update(dsl::group_intents)
-                .filter(dsl::id.eq(intent_id))
-                .set(dsl::state.eq(IntentState::Error))
-                .execute(conn)
-        })?;
+    pub async fn set_group_intent_error(&self, intent_id: ID) -> Result<(), StorageError> {
+        let res = self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_intents)
+                    .filter(dsl::id.eq(intent_id))
+                    .set(dsl::state.eq(IntentState::Error))
+                    .execute(conn)
+            })
+            .await?;
 
         match res {
             // If nothing matched the query, return an error. Either ID or state was wrong
@@ -286,41 +298,44 @@ impl DbConnection {
 
     // Simple lookup of intents by payload hash, meant to be used when processing messages off the
     // network
-    pub fn find_group_intent_by_payload_hash(
+    pub async fn find_group_intent_by_payload_hash(
         &self,
         payload_hash: Vec<u8>,
     ) -> Result<Option<StoredGroupIntent>, StorageError> {
-        let result = self.raw_query(|conn| {
-            dsl::group_intents
-                .filter(dsl::payload_hash.eq(payload_hash))
-                .first::<StoredGroupIntent>(conn)
-                .optional()
-        })?;
+        let result = self
+            .raw_query(move |conn| {
+                dsl::group_intents
+                    .filter(dsl::payload_hash.eq(payload_hash))
+                    .first::<StoredGroupIntent>(conn)
+                    .optional()
+            })
+            .await?;
 
         Ok(result)
     }
 
-    pub fn increment_intent_publish_attempt_count(
+    pub async fn increment_intent_publish_attempt_count(
         &self,
         intent_id: ID,
     ) -> Result<(), StorageError> {
-        self.raw_query(|conn| {
+        self.raw_query(move |conn| {
             diesel::update(dsl::group_intents)
                 .filter(dsl::id.eq(intent_id))
                 .set(dsl::publish_attempts.eq(dsl::publish_attempts + 1))
                 .execute(conn)
-        })?;
+        })
+        .await?;
 
         Ok(())
     }
 
-    pub fn set_group_intent_error_and_fail_msg(
+    pub async fn set_group_intent_error_and_fail_msg(
         &self,
         intent: &StoredGroupIntent,
     ) -> Result<(), StorageError> {
-        self.set_group_intent_error(intent.id)?;
+        self.set_group_intent_error(intent.id).await?;
         if let Some(id) = intent.message_id()? {
-            self.set_delivery_status_to_failed(&id)?;
+            self.set_delivery_status_to_failed(&id).await?;
         }
         Ok(())
     }

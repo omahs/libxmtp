@@ -54,27 +54,29 @@ pub struct RefreshState {
 impl_store!(RefreshState, refresh_state);
 
 impl DbConnection {
-    pub fn get_refresh_state<EntityId: AsRef<Vec<u8>>>(
+    pub async fn get_refresh_state(
         &self,
-        entity_id: EntityId,
+        entity_id: Vec<u8>,
         entity_kind: EntityKind,
     ) -> Result<Option<RefreshState>, StorageError> {
         use super::schema::refresh_state::dsl;
-        let res = self.raw_query(|conn| {
-            dsl::refresh_state
-                .find((entity_id.as_ref(), entity_kind))
-                .first(conn)
-                .optional()
-        })?;
+        let res = self
+            .raw_query(move |conn| {
+                dsl::refresh_state
+                    .find((entity_id, entity_kind))
+                    .first(conn)
+                    .optional()
+            })
+            .await?;
 
         Ok(res)
     }
-    pub fn get_last_cursor_for_id<IdType: AsRef<Vec<u8>>>(
+    pub async fn get_last_cursor_for_id<IdType: AsRef<Vec<u8>>>(
         &self,
         id: IdType,
         entity_kind: EntityKind,
     ) -> Result<i64, StorageError> {
-        let state: Option<RefreshState> = self.get_refresh_state(&id, entity_kind)?;
+        let state: Option<RefreshState> = self.get_refresh_state(&id, entity_kind).await?;
         match state {
             Some(state) => Ok(state.cursor),
             None => {
@@ -89,22 +91,24 @@ impl DbConnection {
         }
     }
 
-    pub fn update_cursor(
+    pub async fn update_cursor(
         &self,
         entity_id: &Vec<u8>,
         entity_kind: EntityKind,
         cursor: i64,
     ) -> Result<bool, StorageError> {
-        let state: Option<RefreshState> = self.get_refresh_state(entity_id, entity_kind)?;
+        let state: Option<RefreshState> = self.get_refresh_state(entity_id, entity_kind).await?;
         match state {
             Some(state) => {
                 use super::schema::refresh_state::dsl;
-                let num_updated = self.raw_query(|conn| {
-                    diesel::update(&state)
-                        .filter(dsl::cursor.lt(cursor))
-                        .set(dsl::cursor.eq(cursor))
-                        .execute(conn)
-                })?;
+                let num_updated = self
+                    .raw_query(move |conn| {
+                        diesel::update(&state)
+                            .filter(dsl::cursor.lt(cursor))
+                            .set(dsl::cursor.eq(cursor))
+                            .execute(conn)
+                    })
+                    .await?;
                 Ok(num_updated == 1)
             }
             None => Err(StorageError::NotFound(format!(

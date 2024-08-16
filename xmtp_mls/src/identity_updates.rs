@@ -366,7 +366,7 @@ pub async fn load_identity_updates<ApiClient: XmtpApi>(
     }
     log::debug!("Fetching identity updates for: {:?}", inbox_ids);
 
-    let existing_sequence_ids = conn.get_latest_sequence_id(&inbox_ids)?;
+    let existing_sequence_ids = conn.get_latest_sequence_id(&inbox_ids).await?;
     let filters: Vec<GetIdentityUpdatesV2Filter> = inbox_ids
         .into_iter()
         .map(|inbox_id| GetIdentityUpdatesV2Filter {
@@ -393,7 +393,7 @@ pub async fn load_identity_updates<ApiClient: XmtpApi>(
         })
         .collect::<Vec<StoredIdentityUpdate>>();
 
-    conn.insert_or_ignore_identity_updates(&to_store)?;
+    conn.insert_or_ignore_identity_updates(&to_store).await?;
     Ok(updates)
 }
 

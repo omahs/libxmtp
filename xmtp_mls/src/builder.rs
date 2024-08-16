@@ -106,7 +106,7 @@ where
         // get sequence_id from identity updates and loaded into the DB
         load_identity_updates(
             &api_client_wrapper,
-            &store.conn()?,
+            &store.conn().await?,
             vec![identity.clone().inbox_id],
         )
         .await?;

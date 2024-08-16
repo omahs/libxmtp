@@ -109,7 +109,7 @@ impl_store!(StoredGroupMessage, group_messages);
 
 impl DbConnection {
     /// Query for group messages
-    pub fn get_group_messages<GroupId: AsRef<[u8]>>(
+    pub async fn get_group_messages<GroupId: AsRef<[u8]>>(
         &self,
         group_id: GroupId,
         sent_after_ns: Option<i64>,
@@ -143,62 +143,77 @@ impl DbConnection {
             query = query.limit(limit);
         }
 
-        Ok(self.raw_query(|conn| query.load::<StoredGroupMessage>(conn))?)
+        Ok(self
+            .raw_query(move |conn| query.load::<StoredGroupMessage>(conn))
+            .await?)
     }
 
     /// Get a particular group message
-    pub fn get_group_message<MessageId: AsRef<[u8]>>(
+    pub async fn get_group_message<MessageId: AsRef<[u8]>>(
         &self,
         id: MessageId,
     ) -> Result<Option<StoredGroupMessage>, StorageError> {
-        Ok(self.raw_query(|conn| {
-            dsl::group_messages
-                .filter(dsl::id.eq(id.as_ref()))
-                .first(conn)
-                .optional()
-        })?)
+        let id = id.as_ref().to_vec();
+        Ok(self
+            .raw_query(move |conn| {
+                dsl::group_messages
+                    .filter(dsl::id.eq(&id))
+                    .first(conn)
+                    .optional()
+            })
+            .await?)
     }
 
-    pub fn get_group_message_by_timestamp<GroupId: AsRef<[u8]>>(
+    pub async fn get_group_message_by_timestamp<GroupId: AsRef<[u8]>>(
         &self,
         group_id: GroupId,
         timestamp: i64,
     ) -> Result<Option<StoredGroupMessage>, StorageError> {
-        Ok(self.raw_query(|conn| {
-            dsl::group_messages
-                .filter(dsl::group_id.eq(group_id.as_ref()))
-                .filter(dsl::sent_at_ns.eq(timestamp))
-                .first(conn)
-                .optional()
-        })?)
+        let group_id = group_id.as_ref().to_vec();
+
+        Ok(self
+            .raw_query(move |conn| {
+                dsl::group_messages
+                    .filter(dsl::group_id.eq(group_id))
+                    .filter(dsl::sent_at_ns.eq(timestamp))
+                    .first(conn)
+                    .optional()
+            })
+            .await?)
     }
 
-    pub fn set_delivery_status_to_published<MessageId: AsRef<[u8]>>(
+    pub async fn set_delivery_status_to_published<MessageId: AsRef<[u8]>>(
         &self,
         msg_id: &MessageId,
         timestamp: u64,
     ) -> Result<usize, StorageError> {
-        Ok(self.raw_query(|conn| {
-            diesel::update(dsl::group_messages)
-                .filter(dsl::id.eq(msg_id.as_ref()))
-                .set((
-                    dsl::delivery_status.eq(DeliveryStatus::Published),
-                    dsl::sent_at_ns.eq(timestamp as i64),
-                ))
-                .execute(conn)
-        })?)
+        let msg_id = msg_id.as_ref().to_vec();
+        Ok(self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_messages)
+                    .filter(dsl::id.eq(msg_id))
+                    .set((
+                        dsl::delivery_status.eq(DeliveryStatus::Published),
+                        dsl::sent_at_ns.eq(timestamp as i64),
+                    ))
+                    .execute(conn)
+            })
+            .await?)
     }
 
-    pub fn set_delivery_status_to_failed<MessageId: AsRef<[u8]>>(
+    pub async fn set_delivery_status_to_failed<MessageId: AsRef<[u8]>>(
         &self,
         msg_id: &MessageId,
     ) -> Result<usize, StorageError> {
-        Ok(self.raw_query(|conn| {
-            diesel::update(dsl::group_messages)
-                .filter(dsl::id.eq(msg_id.as_ref()))
-                .set((dsl::delivery_status.eq(DeliveryStatus::Failed),))
-                .execute(conn)
-        })?)
+        let id = msg_id.as_ref().to_vec();
+        Ok(self
+            .raw_query(move |conn| {
+                diesel::update(dsl::group_messages)
+                    .filter(dsl::id.eq(msg_id.as_ref()))
+                    .set((dsl::delivery_status.eq(DeliveryStatus::Failed),))
+                    .execute(conn)
+            })
+            .await?)
     }
 }
 

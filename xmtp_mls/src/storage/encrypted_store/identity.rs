@@ -63,14 +63,14 @@ mod tests {
     };
     use crate::{utils::test::rand_vec, Store};
 
-    #[test]
-    fn can_only_store_one_identity() {
+    #[tokio::test]
+    async fn can_only_store_one_identity() {
         let store = EncryptedMessageStore::new(
             StorageOption::Ephemeral,
             EncryptedMessageStore::generate_enc_key(),
         )
         .unwrap();
-        let conn = &store.conn().unwrap();
+        let conn = &store.conn().await;
 
         StoredIdentity::new("".to_string(), rand_vec(), rand_vec())
             .store(conn)

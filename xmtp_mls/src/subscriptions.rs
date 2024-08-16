@@ -95,7 +95,7 @@ where
         );
 
         if let Some(err) = creation_result.as_ref().err() {
-            let conn = self.context.store.conn()?;
+            let conn = self.context.store.conn().await?;
             let result = conn.find_group_by_welcome_id(welcome_v1.id as i64);
             match result {
                 Ok(Some(group)) => {

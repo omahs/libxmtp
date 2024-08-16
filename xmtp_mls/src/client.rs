@@ -245,8 +245,8 @@ impl XmtpMlsLocalContext {
         self.identity.signature_request()
     }
 
-    pub(crate) fn mls_provider(&self, conn: DbConnection) -> XmtpOpenMlsProvider {
-        XmtpOpenMlsProvider::new(conn)
+    pub(crate) fn mls_provider(&self) -> XmtpOpenMlsProvider {
+        self.store.provider()
     }
 }
 
@@ -265,6 +265,7 @@ where
     ) -> Self {
         let context = XmtpMlsLocalContext { identity, store };
         let (tx, _) = broadcast::channel(10);
+
         Self {
             api_client,
             context: Arc::new(context),
@@ -320,8 +321,8 @@ where
         &self.context.identity
     }
 
-    pub(crate) fn mls_provider(&self, conn: DbConnection) -> XmtpOpenMlsProvider {
-        XmtpOpenMlsProvider::new(conn)
+    pub(crate) fn mls_provider(&self) -> XmtpOpenMlsProvider {
+        self.context.mls_provider()
     }
 
     pub fn context(&self) -> &Arc<XmtpMlsLocalContext> {
@@ -507,9 +508,9 @@ where
     ) -> Result<ReturnValue, MessageProcessingError>
     where
         Fut: Future<Output = Result<ReturnValue, MessageProcessingError>>,
-        ProcessingFn: FnOnce(XmtpOpenMlsProvider) -> Fut + Send,
+        ProcessingFn: FnOnce(&XmtpOpenMlsProvider) -> Fut + Send,
     {
-        self.store()
+        self.mls_provider()
             .transaction_async(|provider| async move {
                 let is_updated =
                     provider
@@ -520,7 +521,7 @@ where
                 }
                 process_envelope(provider).await
             })
-            .await
+            .await;
     }
 
     /// Download all unread welcome messages and convert to groups.

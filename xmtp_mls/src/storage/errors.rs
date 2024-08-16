@@ -37,6 +37,12 @@ pub enum StorageError {
     Intent(#[from] IntentError),
     #[error("The SQLCipher Sqlite extension is not present, but an encryption key is given")]
     SqlCipherNotLoaded,
+    #[error("Pool Build Error {0}")]
+    PoolBuild(#[from] deadpool_diesel::sqlite::BuildError),
+    #[error(" Deadpool Error {0}")]
+    Deadpool(#[from] deadpool_diesel::sqlite::PoolError),
+    #[error("Connection Interact {0}")]
+    Interact(#[from] deadpool_diesel::InteractError),
 }
 
 impl<T> From<PoisonError<T>> for StorageError {

@@ -25,7 +25,7 @@ impl Delete<StoredKeyStoreEntry> for DbConnection {
 }
 
 impl DbConnection {
-    pub fn insert_or_update_key_store_entry(
+    pub async fn insert_or_update_key_store_entry(
         &self,
         key: Vec<u8>,
         value: Vec<u8>,
@@ -40,7 +40,8 @@ impl DbConnection {
             diesel::replace_into(openmls_key_store)
                 .values(entry)
                 .execute(conn)
-        })?;
+        })
+        .await?;
         Ok(())
     }
 }

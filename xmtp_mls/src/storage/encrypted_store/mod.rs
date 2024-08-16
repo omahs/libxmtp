@@ -23,10 +23,11 @@ pub mod schema;
 
 use std::{borrow::Cow, sync::Arc};
 
+use deadpool_diesel::sqlite::{Connection, Manager, Pool, Runtime};
 use diesel::{
     connection::{AnsiTransactionManager, SimpleConnection, TransactionManager},
     prelude::*,
-    r2d2::{ConnectionManager, Pool, PoolTransactionManager, PooledConnection},
+    r2d2::PoolTransactionManager,
     result::{DatabaseErrorKind, Error},
     sql_query,
 };
@@ -43,7 +44,7 @@ use crate::{xmtp_openmls_provider::XmtpOpenMlsProvider, Store};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
-pub type RawDbConnection = PooledConnection<ConnectionManager<SqliteConnection>>;
+pub type RawDbConnection = Connection;
 
 pub type EncryptionKey = [u8; 32];
 
@@ -86,12 +87,23 @@ pub fn ignore_unique_violation<T>(
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// Manages a Sqlite db for persisting messages and other objects.
 pub struct EncryptedMessageStore {
     connect_opt: StorageOption,
-    pool: Arc<RwLock<Option<Pool<ConnectionManager<SqliteConnection>>>>>,
-    enc_key: Option<EncryptionKey>,
+    pool: Arc<RwLock<Option<Pool>>>,
+    enc_key: Option<Arc<EncryptionKey>>,
+    provider: XmtpOpenMlsProvider,
+}
+
+impl std::fmt::Debug for EncryptedMessageStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedMessageStore")
+            .field("connect_opt", &self.connect_opt)
+            .field("pool", &"Pool does not impl Debug".to_string())
+            .field("enc_key", &self.enc_key)
+            .finish()
+    }
 }
 
 impl<'a> From<&'a EncryptedMessageStore> for Cow<'a, EncryptedMessageStore> {
@@ -115,26 +127,43 @@ impl EncryptedMessageStore {
         enc_key: Option<EncryptionKey>,
     ) -> Result<Self, StorageError> {
         log::info!("Setting up DB connection pool");
-        let pool =
-            match opts {
-                StorageOption::Ephemeral => Pool::builder()
-                    .max_size(1)
-                    .build(ConnectionManager::<SqliteConnection>::new(":memory:"))?,
-                StorageOption::Persistent(ref path) => Pool::builder()
-                    .max_size(10)
-                    .build(ConnectionManager::<SqliteConnection>::new(path))?,
-            };
-
+        let (pool, connection) = Self::pool(&opts)?;
+        
         // TODO: Validate that sqlite is correctly configured. Bad EncKey is not detected until the
         // migrations run which returns an unhelpful error.
         let mut obj = Self {
             connect_opt: opts,
-            pool: Arc::new(Some(pool).into()),
-            enc_key,
+            pool: Arc::new(RwLock::new(Some(pool))),
+            enc_key: enc_key.map(|k| Arc::new(k)),
+            provider: XmtpOpenMlsProvider::new(connection),
         };
 
         obj.init_db()?;
         Ok(obj)
+    }
+
+    pub(crate) fn provider(&self) -> XmtpOpenMlsProvider {
+        self.provider.clone()
+    }
+
+    /// Creates new storage pool
+    fn pool(opts: &StorageOption) -> Result<(Pool, SqliteConnection), StorageError> {
+        let pool = match opts {
+            StorageOption::Ephemeral => {
+                panic!("unsupported");
+                Pool::builder(Manager::new(":memory:", Runtime::Tokio1))
+                .max_size(1)
+                .build()?
+                
+            },
+            StorageOption::Persistent(ref path) => {
+                (Pool::builder(Manager::new(path, Runtime::Tokio1))
+                    .max_size(10)
+                    .build()?,
+                SqliteConnection::establish(path))
+            }
+        };
+        Ok(pool)
     }
 
     fn init_db(&mut self) -> Result<(), StorageError> {
@@ -175,9 +204,7 @@ impl EncryptedMessageStore {
         Ok(())
     }
 
-    pub(crate) fn raw_conn(
-        &self,
-    ) -> Result<PooledConnection<ConnectionManager<SqliteConnection>>, StorageError> {
+    pub(crate) async fn raw_conn(&self) -> Result<Connection, StorageError> {
         let pool_guard = self.pool.read();
 
         let pool = pool_guard
@@ -185,73 +212,32 @@ impl EncryptedMessageStore {
             .ok_or(StorageError::PoolNeedsConnection)?;
 
         log::debug!(
-            "Pulling connection from pool, idle_connections={}, total_connections={}",
-            pool.state().idle_connections,
-            pool.state().connections
+            "Pulling connection from pool, max_size={}, current_size={}, waiting_connections={}, available_connections={}",
+            pool.status().max_size,
+            pool.status().size,
+            pool.status().waiting,
+            pool.status().available
         );
 
-        let mut conn = pool.get()?;
-        if let Some(ref key) = self.enc_key {
-            conn.batch_execute(&format!("PRAGMA key = \"x'{}'\";", hex::encode(key)))?;
+        let conn = pool.get().await?;
+
+        if let Some(ref key) = &self.enc_key {
+            let key = key.clone();
+            conn.interact(move |conn| {
+                conn.batch_execute(&format!("PRAGMA key = \"x'{}'\";", hex::encode(&*key)))
+            })
+            .await?;
         }
 
-        conn.batch_execute("PRAGMA busy_timeout = 5000;")?;
+        conn.interact(|conn| conn.batch_execute("PRAGMA busy_timeout = 5000;"))
+            .await?;
 
         Ok(conn)
     }
 
-    pub fn conn(&self) -> Result<DbConnection, StorageError> {
-        let conn = self.raw_conn()?;
+    pub(crate) async fn conn(&self) -> Result<DbConnection, StorageError> {
+        let conn = self.raw_conn().await?;
         Ok(DbConnection::new(conn))
-    }
-
-    /// Start a new database transaction with the OpenMLS Provider from XMTP
-    /// # Arguments
-    /// `fun`: Scoped closure providing a MLSProvider to carry out the transaction
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// store.transaction(|provider| {
-    ///     // do some operations requiring provider
-    ///     // access the connection with .conn()
-    ///     provider.conn().db_operation()?;
-    /// })
-    /// ```
-    pub fn transaction<T, F, E>(&self, fun: F) -> Result<T, E>
-    where
-        F: FnOnce(&XmtpOpenMlsProvider) -> Result<T, E>,
-        E: From<diesel::result::Error> + From<StorageError>,
-    {
-        log::debug!("Transaction beginning");
-        let mut connection = self.raw_conn()?;
-        AnsiTransactionManager::begin_transaction(&mut *connection)?;
-
-        let db_connection = DbConnection::new(connection);
-        let provider = XmtpOpenMlsProvider::new(db_connection);
-        let conn = provider.conn_ref();
-
-        match fun(&provider) {
-            Ok(value) => {
-                conn.raw_query(|conn| {
-                    PoolTransactionManager::<AnsiTransactionManager>::commit_transaction(&mut *conn)
-                })?;
-                log::debug!("Transaction being committed");
-                Ok(value)
-            }
-            Err(err) => {
-                log::debug!("Transaction being rolled back");
-                match conn.raw_query(|conn| {
-                    PoolTransactionManager::<AnsiTransactionManager>::rollback_transaction(
-                        &mut *conn,
-                    )
-                }) {
-                    Ok(()) => Err(err),
-                    Err(Error::BrokenTransactionManager) => Err(err),
-                    Err(rollback) => Err(rollback.into()),
-                }
-            }
-        }
     }
 
     /// Start a new database transaction with the OpenMLS Provider from XMTP
@@ -270,44 +256,46 @@ impl EncryptedMessageStore {
     /// ```
     pub async fn transaction_async<T, F, E, Fut>(&self, fun: F) -> Result<T, E>
     where
-        F: FnOnce(XmtpOpenMlsProvider) -> Fut,
-        Fut: futures::Future<Output = Result<T, E>>,
-        E: From<diesel::result::Error> + From<StorageError>,
+        F: Send + 'static + FnOnce(XmtpOpenMlsProvider) -> Fut,
+        Fut: futures::Future<Output = Result<T, E>> + Send,
+        E: From<diesel::result::Error>
+            + From<StorageError>
+            + From<deadpool_diesel::InteractError>
+            + Send
+            + 'static,
+        T: Send + 'static,
     {
         log::debug!("Transaction async beginning");
-        let mut connection = self.raw_conn()?;
-        AnsiTransactionManager::begin_transaction(&mut *connection)?;
+        let connection = self.raw_conn().await?;
 
-        let db_connection = DbConnection::new(connection);
-        let provider = XmtpOpenMlsProvider::new(db_connection);
-        let local_provider = provider.clone();
+        connection
+            .interact(|conn| {
+                AnsiTransactionManager::begin_transaction(conn)?;
 
-        let result = fun(provider).await;
+                let provider = XmtpOpenMlsProvider::new(conn);
+                // deadpool `interact` occurs in a blocking thread
+                // block_on will only block that thread.
+                let handle = tokio::runtime::Handle::current();
+                let result = handle.block_on(fun(provider));
+                drop(provider);
 
-        // after the closure finishes, `local_provider` should have the only reference ('strong')
-        // to `XmtpOpenMlsProvider` inner `DbConnection`..
-        let conn_ref = local_provider.conn_ref();
-        match result {
-            Ok(value) => {
-                conn_ref.raw_query(|conn| {
-                    PoolTransactionManager::<AnsiTransactionManager>::commit_transaction(&mut *conn)
-                })?;
-                log::debug!("Transaction async being committed");
-                Ok(value)
-            }
-            Err(err) => {
-                log::debug!("Transaction async being rolled back");
-                match conn_ref.raw_query(|conn| {
-                    PoolTransactionManager::<AnsiTransactionManager>::rollback_transaction(
-                        &mut *conn,
-                    )
-                }) {
-                    Ok(()) => Err(err),
-                    Err(Error::BrokenTransactionManager) => Err(err),
-                    Err(rollback) => Err(rollback.into()),
+                match result {%
+                    Ok(value) => {
+                        AnsiTransactionManager::commit_transaction(&mut *conn)?;
+                        log::debug!("Transaction async being committed");
+                        Ok(value)
+                    }
+                    Err(err) => {
+                        log::debug!("Transaction async being rolled back");
+                        match AnsiTransactionManager::rollback_transaction(&mut *conn) {
+                            Ok(()) => Err(err),
+                            Err(Error::BrokenTransactionManager) => Err(err),
+                            Err(rollback) => Err(rollback.into()),
+                        }
+                    }
                 }
-            }
-        }
+            })
+            .await?
     }
 
     pub fn generate_enc_key() -> EncryptionKey {
@@ -324,16 +312,7 @@ impl EncryptedMessageStore {
     }
 
     pub fn reconnect(&self) -> Result<(), StorageError> {
-        let pool =
-            match self.connect_opt {
-                StorageOption::Ephemeral => Pool::builder()
-                    .max_size(1)
-                    .build(ConnectionManager::<SqliteConnection>::new(":memory:"))?,
-                StorageOption::Persistent(ref path) => Pool::builder()
-                    .max_size(10)
-                    .build(ConnectionManager::<SqliteConnection>::new(path))?,
-            };
-
+        let pool = Self::pool(&self.connect_opt)?;
         let mut pool_write = self.pool.write();
         *pool_write = Some(pool);
 

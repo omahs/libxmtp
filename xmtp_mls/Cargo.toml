@@ -27,6 +27,7 @@ diesel = { version = "2.2.2", features = [
     "returning_clauses_for_sqlite_3_35",
 ] }
 diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
+deadpool-diesel  = { version = "0.6", features = ["sqlite", "rt_tokio_1", "tracing"] }
 ed25519-dalek = "2.1.1"
 ethers.workspace = true
 ethers-core.workspace = true

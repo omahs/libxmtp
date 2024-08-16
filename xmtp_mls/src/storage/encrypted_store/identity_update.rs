@@ -49,15 +49,15 @@ impl_store!(StoredIdentityUpdate, identity_updates);
 impl DbConnection {
     /// Returns all identity updates for the given inbox ID up to the provided sequence_id.
     /// Returns updates greater than `from_sequence_id` and less than _or equal to_ `to_sequence_id`
-    pub fn get_identity_updates<InboxId: AsRef<str>>(
+    pub async fn get_identity_updates(
         &self,
-        inbox_id: InboxId,
+        inbox_id: String,
         from_sequence_id: Option<i64>,
         to_sequence_id: Option<i64>,
     ) -> Result<Vec<StoredIdentityUpdate>, StorageError> {
         let mut query = dsl::identity_updates
             .order(dsl::sequence_id.asc())
-            .filter(dsl::inbox_id.eq(inbox_id.as_ref()))
+            .filter(dsl::inbox_id.eq(inbox_id))
             .into_boxed();
 
         if let Some(sequence_id) = from_sequence_id {
@@ -68,25 +68,34 @@ impl DbConnection {
             query = query.filter(dsl::sequence_id.le(sequence_id));
         }
 
-        Ok(self.raw_query(|conn| query.load::<StoredIdentityUpdate>(conn))?)
+        Ok(self
+            .raw_query(move |conn| query.load::<StoredIdentityUpdate>(conn))
+            .await?)
     }
 
     /// Batch insert identity updates, ignoring duplicates.
     #[tracing::instrument(level = "trace", skip(updates))]
-    pub fn insert_or_ignore_identity_updates(
+    pub async fn insert_or_ignore_identity_updates(
         &self,
-        updates: &[StoredIdentityUpdate],
+        updates: Vec<StoredIdentityUpdate>,
     ) -> Result<(), StorageError> {
-        Ok(self.raw_query(|conn| {
-            diesel::insert_or_ignore_into(dsl::identity_updates)
-                .values(updates)
-                .execute(conn)?;
+        Ok(self
+            .raw_query(move |conn| {
+                diesel::insert_or_ignore_into(dsl::identity_updates)
+                    .values(updates)
+                    .execute(conn)?;
 
-            Ok(())
-        })?)
+                Ok(())
+            })
+            .await?)
     }
 
-    pub fn get_latest_sequence_id_for_inbox(&self, inbox_id: &str) -> Result<i64, StorageError> {
+    pub async fn get_latest_sequence_id_for_inbox(
+        &self,
+        inbox_id: &str,
+    ) -> Result<i64, StorageError> {
+        let inbox_id = inbox_id.to_string();
+
         let query = dsl::identity_updates
             .select(dsl::sequence_id)
             .order(dsl::sequence_id.desc())
@@ -94,14 +103,14 @@ impl DbConnection {
             .filter(dsl::inbox_id.eq(inbox_id))
             .into_boxed();
 
-        Ok(self.raw_query(|conn| query.first::<i64>(conn))?)
+        Ok(self.raw_query(|conn| query.first::<i64>(conn)).await?)
     }
 
     /// Given a list of inbox_ids return a HashMap of each inbox ID -> highest known sequence ID
     #[tracing::instrument(level = "trace", skip_all)]
-    pub fn get_latest_sequence_id(
+    pub async fn get_latest_sequence_id(
         &self,
-        inbox_ids: &[String],
+        inbox_ids: Vec<String>,
     ) -> Result<HashMap<String, i64>, StorageError> {
         // Query IdentityUpdates grouped by inbox_id, getting the max sequence_id
         let query = dsl::identity_updates
@@ -111,7 +120,8 @@ impl DbConnection {
 
         // Get the results as a Vec of (inbox_id, sequence_id) tuples
         let result_tuples: Vec<(String, i64)> = self
-            .raw_query(|conn| query.load::<(String, Option<i64>)>(conn))?
+            .raw_query(move |conn| query.load::<(String, Option<i64>)>(conn))
+            .await?
             .into_iter()
             // Diesel needs an Option type for aggregations like max(sequence_id), so we
             // unwrap the option here
