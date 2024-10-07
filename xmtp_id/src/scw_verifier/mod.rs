@@ -2,12 +2,13 @@ mod chain_rpc_verifier;
 
 use std::{collections::HashMap, fs, path::Path, str::FromStr};
 
+use alloy::primitives::{BlockNumber, Bytes};
+use alloy::transports::TransportErrorKind;
 use async_trait::async_trait;
 use dyn_clone::DynClone;
 use ethers::{
     contract::ContractError,
     providers::{Http, Provider, ProviderError},
-    types::{BlockNumber, Bytes, U64},
 };
 use thiserror::Error;
 use url::Url;
@@ -30,11 +31,17 @@ pub enum VerifierError {
     Abi(#[from] ethers::abi::Error),
     #[error(transparent)]
     Provider(#[from] ethers::providers::ProviderError),
+    #[error(transparent)]
+    Alloy(#[from] alloy::transports::RpcError<TransportErrorKind>),
+    #[error(transparent)]
+    Url(#[from] url::ParseError),
+    #[error(transparent)]
+    RustcFromHex(#[from] rustc_hex::FromHexError),
 }
 
 #[async_trait]
 pub trait SmartContractSignatureVerifier: Send + Sync + DynClone + 'static {
-    async fn current_block_number(&self, chain_id: &str) -> Result<U64, VerifierError>;
+    async fn current_block_number(&self, chain_id: &str) -> Result<u64, VerifierError>;
     async fn is_valid_signature(
         &self,
         account_id: AccountId,
@@ -60,7 +67,7 @@ impl<S: SmartContractSignatureVerifier + Clone> SmartContractSignatureVerifier f
             .await
     }
 
-    async fn current_block_number(&self, chain_id: &str) -> Result<U64, VerifierError> {
+    async fn current_block_number(&self, chain_id: &str) -> Result<u64, VerifierError> {
         (**self).current_block_number(chain_id).await
     }
 }
@@ -71,22 +78,22 @@ pub struct MultiSmartContractSignatureVerifier {
 }
 
 impl MultiSmartContractSignatureVerifier {
-    pub fn new(urls: HashMap<u64, url::Url>) -> Self {
+    pub fn new(urls: HashMap<u64, url::Url>) -> Result<Self, VerifierError> {
         let verifiers: HashMap<u64, Box<dyn SmartContractSignatureVerifier>> = urls
             .into_iter()
             .map(|(chain_id, url)| {
-                (
+                Ok::<_, VerifierError>((
                     chain_id,
-                    Box::new(RpcSmartContractWalletVerifier::new(url.to_string()))
+                    Box::new(RpcSmartContractWalletVerifier::new(url.to_string())?)
                         as Box<dyn SmartContractSignatureVerifier>,
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
-        Self { verifiers }
+        Ok(Self { verifiers })
     }
 
-    pub fn new_from_file(path: impl AsRef<Path>) -> Self {
+    pub fn new_from_file(path: impl AsRef<Path>) -> Result<Self, VerifierError> {
         let path = path.as_ref();
 
         let file_str;
@@ -140,7 +147,7 @@ impl SmartContractSignatureVerifier for MultiSmartContractSignatureVerifier {
         )))
     }
 
-    async fn current_block_number(&self, chain_id: &str) -> Result<U64, VerifierError> {
+    async fn current_block_number(&self, chain_id: &str) -> Result<u64, VerifierError> {
         let id: u64 = chain_id.parse().map_err(|e| {
             VerifierError::Contract(ContractError::DecodingError(
                 ethers::core::abi::Error::ParseInt(e),

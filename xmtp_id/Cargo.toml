@@ -8,6 +8,7 @@ async-trait.workspace = true
 chrono.workspace = true
 ed25519-dalek = { workspace = true, features = ["digest"] }
 ethers.workspace = true
+alloy = { workspace = true, features = ["sol-types", "reqwest", "providers", "contract"]}
 futures.workspace = true
 hex.workspace = true
 tracing.workspace = true
