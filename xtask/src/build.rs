@@ -63,6 +63,7 @@ pub fn build_bindings_wasm(extra_args: &[String], flags: flags::BindingsWasm) ->
 
     sp.text("running wasm-opt").update();
     step_run_wasm_opt(&pkg_directory, spinner_update)?;
+    sp.text("package `bindings_wasm` built 🦀");
     sp.success();
     Ok(())
 }
@@ -74,6 +75,7 @@ pub fn cargo_build<T>(extra_args: &[String], f: impl Fn(&str) -> T) -> Result<()
         sh,
         "cargo build -p {BINDINGS_WASM} --target wasm32-unknown-unknown {extra_args...}"
     );
+    f(&format!("{}", cmd));
     pretty_print(cmd, f)?;
 
     Ok(())
@@ -88,6 +90,7 @@ pub fn step_wasm_bindgen_build<T>(
     let sh = Shell::new()?;
     // let _env = sh.push_env("RUSTFLAGS", crate::RUSTFLAGS);
     let cmd = cmd!(sh, "wasm-bindgen {wasm_path} --out-dir {pkg_directory} --typescript --target web --split-linked-modules");
+    f(&format!("{}", cmd));
     pretty_print(cmd, f)?;
     Ok(())
 }
